@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Book Reader</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1DB954">
+<link rel="apple-touch-icon" href="icon-512.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Reader">
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #121212; color: #fff; }
+  #root { height: 100vh; height: 100dvh; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  input[type="range"] { -webkit-appearance: none; height: 4px; background: #2a2a2a; border-radius: 2px; outline: none; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; background: #1DB954; border-radius: 50%; cursor: pointer; }
+  input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; background: #1DB954; border-radius: 50%; cursor: pointer; border: none; }
+  select { font-family: inherit; -webkit-appearance: none; appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23888'><path d='M7 10l5 5 5-5z'/></svg>"); background-repeat: no-repeat; background-position: right 6px center; padding-right: 22px; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const STORAGE_KEY = "book_reader_pwa_v1";
+const ACCENT = "#1DB954";
+
+function parseText(t) { return t.replace(/\r\n/g, "\n").replace(/\r/g, "\n"); }
+function splitParagraphs(t) { return t.split(/\n{2,}/).map(p => p.trim()).filter(Boolean); }
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+    const s = document.createElement("script");
+    s.src = src; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+
+async function extractText(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".txt")) return parseText(await file.text());
+  if (name.endsWith(".pdf")) {
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");
+    const lib = window["pdfjs-dist/build/pdf"];
+    lib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+    let txt = "";
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const pg = await pdf.getPage(i);
+      txt += (await pg.getTextContent()).items.map(s => s.str).join(" ") + "\n\n";
+    }
+    return parseText(txt);
+  }
+  if (name.endsWith(".docx")) {
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js");
+    return parseText((await window.mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value);
+  }
+  throw new Error("Unsupported file type");
+}
+
+function useStorage() {
+  const [data, setData] = useState({ books: [], activeBookId: null });
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    try { const raw = localStorage.getItem(STORAGE_KEY); if (raw) setData(JSON.parse(raw)); } catch {}
+    setLoaded(true);
+  }, []);
+  const save = useCallback((nd) => {
+    setData(nd);
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(nd)); } catch (e) { console.error("Storage full", e); }
+  }, []);
+  return [data, save, loaded];
+}
+
+function Icon({ d, size = 18, fill = "currentColor" }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} style={{ display: "block", flexShrink: 0 }}><path d={d} /></svg>;
+}
+
+const ICONS = {
+  play: "M8 5v14l11-7z",
+  pause: "M6 19h4V5H6v14zm8-14v14h4V5h-4z",
+  prev: "M6 6h2v12H6zm3.5 6 8.5 6V6z",
+  next: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z",
+  back: "M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z",
+  fwd: "M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z",
+  bookmark: "M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z",
+  list: "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z",
+  upload: "M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z",
+  sun: "M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2v-2H2v2zm18 0h2v-2h-2v2zM11 2v2h2V2h-2zm0 18v2h2v-2h-2zM5.99 4.58l-1.42 1.42 1.41 1.41 1.42-1.42L5.99 4.58zm12.03 12.03-1.42 1.42 1.41 1.41 1.42-1.42-1.41-1.41zM18.02 4.58l-1.41 1.41 1.42 1.42 1.41-1.41-1.42-1.42zM5.99 16.61l-1.41 1.41 1.42 1.42 1.41-1.42-1.42-1.41z",
+  moon: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
+  close: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  chevL: "M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z",
+  voice: "M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z",
+};
+
+function App() {
+  const [data, save, loaded] = useStorage();
+  const [view, setView] = useState("library");
+  const [activeBook, setActiveBook] = useState(null);
+  const [dark, setDark] = useState(true);
+  const [fontSize, setFontSize] = useState(19);
+  const [showPanel, setShowPanel] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [voices, setVoices] = useState([]);
+  const [selectedVoice, setSelectedVoice] = useState("");
+  const [rate, setRate] = useState(1.0);
+  const [pitch, setPitch] = useState(1.0);
+  const [playing, setPlaying] = useState(false);
+  const [currentParaIdx, setCurrentParaIdx] = useState(0);
+  const [wordRange, setWordRange] = useState(null);
+  const fileRef = useRef();
+  const contentRef = useRef();
+  const paraRefs = useRef([]);
+  const stoppedRef = useRef(false);
+  const paraIdxRef = useRef(0);
+
+  useEffect(() => {
+    if (!window.speechSynthesis) return;
+    let attempts = 0, timer = null, mounted = true;
+    const load = () => {
+      if (!mounted) return;
+      try {
+        const v = window.speechSynthesis.getVoices();
+        if (!v.length) return;
+        const en = v.filter(x => x.lang.startsWith("en"));
+        setVoices(prev => en.length !== prev.length ? en : prev);
+        setSelectedVoice(s => {
+          if (s) return s;
+          const pref = en.find(x => x.localService) || en[0];
+          return pref?.name || "";
+        });
+      } catch {}
+    };
+    const poll = () => { load(); if (mounted && ++attempts < 15) timer = setTimeout(poll, 500); };
+    window.speechSynthesis.onvoiceschanged = load;
+    timer = setTimeout(poll, 100);
+    return () => { mounted = false; clearTimeout(timer); try { window.speechSynthesis.onvoiceschanged = null; } catch {} };
+  }, []);
+
+  useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
+
+  useEffect(() => {
+    if (loaded && data.activeBookId) {
+      const b = data.books.find(b => b.id === data.activeBookId);
+      if (b) { setActiveBook(b); setView("reader"); setCurrentParaIdx(b.paraIdx || 0); paraIdxRef.current = b.paraIdx || 0; }
+    }
+  }, [loaded]);
+
+  useEffect(() => {
+    if (activeBook && contentRef.current) setTimeout(() => scrollToPara(activeBook.paraIdx || 0), 80);
+  }, [activeBook?.id]);
+
+  const scrollToPara = (idx) => {
+    const el = paraRefs.current[idx];
+    if (el && contentRef.current) contentRef.current.scrollTop = Math.max(0, el.offsetTop - 120);
+  };
+
+  const saveProgress = useCallback((idx) => {
+    if (!activeBook) return;
+    const pct = activeBook.paragraphs.length > 1 ? Math.round((idx / (activeBook.paragraphs.length - 1)) * 100) : 0;
+    const books = data.books.map(b => b.id === activeBook.id ? { ...b, paraIdx: idx, progress: pct } : b);
+    save({ ...data, books, activeBookId: activeBook.id });
+    setActiveBook(prev => ({ ...prev, paraIdx: idx, progress: pct }));
+  }, [activeBook, data, save]);
+
+  const speakFrom = useCallback((idx) => {
+    window.speechSynthesis.cancel();
+    stoppedRef.current = false;
+    setPlaying(true);
+    const paras = activeBook?.paragraphs || [];
+    const voice = voices.find(v => v.name === selectedVoice) || null;
+    const next = (i) => {
+      if (stoppedRef.current || i >= paras.length) { setPlaying(false); setWordRange(null); return; }
+      paraIdxRef.current = i;
+      setCurrentParaIdx(i);
+      scrollToPara(i);
+      saveProgress(i);
+      const u = new SpeechSynthesisUtterance(paras[i]);
+      u.voice = voice; u.rate = rate; u.pitch = pitch;
+      u.onboundary = e => { if (e.name === "word") setWordRange({ pi: i, s: e.charIndex, e: e.charIndex + (e.charLength || 1) }); };
+      u.onend = () => { setWordRange(null); if (!stoppedRef.current) next(i + 1); };
+      u.onerror = () => { setWordRange(null); if (!stoppedRef.current) next(i + 1); };
+      window.speechSynthesis.speak(u);
+    };
+    next(idx);
+  }, [activeBook, voices, selectedVoice, rate, pitch, saveProgress]);
+
+  const stop = () => { stoppedRef.current = true; window.speechSynthesis.cancel(); setPlaying(false); setWordRange(null); };
+  const toggle = () => playing ? stop() : speakFrom(currentParaIdx);
+  const skip = (d) => {
+    const paras = activeBook?.paragraphs || [];
+    const next = Math.max(0, Math.min(paras.length - 1, currentParaIdx + d));
+    setCurrentParaIdx(next); paraIdxRef.current = next; scrollToPara(next); saveProgress(next);
+    if (playing) { stop(); setTimeout(() => speakFrom(next), 80); }
+  };
+
+  const openBook = (b) => { stop(); setActiveBook(b); setCurrentParaIdx(b.paraIdx || 0); paraIdxRef.current = b.paraIdx || 0; setView("reader"); save({ ...data, activeBookId: b.id }); };
+  const deleteBook = (id) => {
+    if (activeBook?.id === id) stop();
+    const books = data.books.filter(b => b.id !== id);
+    save({ ...data, books, activeBookId: data.activeBookId === id ? null : data.activeBookId });
+    if (activeBook?.id === id) { setActiveBook(null); setView("library"); }
+  };
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    setUploading(true); setUploadError("");
+    try {
+      const text = await extractText(file);
+      const book = { id: Date.now().toString(), title: file.name.replace(/\.(txt|pdf|docx)$/i, ""), paragraphs: splitParagraphs(text), progress: 0, paraIdx: 0, bookmarks: [], added: new Date().toLocaleDateString() };
+      save({ ...data, books: [book, ...data.books] });
+    } catch (err) { setUploadError("Could not read: " + (err.message || "unknown")); }
+    setUploading(false); e.target.value = "";
+  };
+
+  const addBookmark = () => {
+    if (!activeBook) return;
+    const bm = { id: Date.now(), paraIdx: currentParaIdx, label: `Para ${currentParaIdx + 1}`, date: new Date().toLocaleDateString() };
+    const books = data.books.map(b => b.id === activeBook.id ? { ...b, bookmarks: [...(b.bookmarks || []), bm] } : b);
+    save({ ...data, books }); setActiveBook(prev => ({ ...prev, bookmarks: [...(prev.bookmarks || []), bm] }));
+  };
+
+  const bg = dark ? "#121212" : "#ffffff";
+  const surface = dark ? "#1e1e1e" : "#f5f5f5";
+  const surface2 = dark ? "#2a2a2a" : "#ebebeb";
+  const fg = dark ? "#ffffff" : "#111111";
+  const fg2 = dark ? "#b3b3b3" : "#666666";
+  const fg3 = dark ? "#535353" : "#c0c0c0";
+  const border = dark ? "#2a2a2a" : "#e0e0e0";
+
+  if (!loaded) return <div style={{ padding: "2rem", color: fg, background: bg, minHeight: "100vh" }}>Loading…</div>;
+
+  const renderPara = (p, i) => {
+    const isActive = i === currentParaIdx;
+    const isWord = wordRange?.pi === i;
+    let content = p;
+    if (isWord) {
+      const { s, e } = wordRange;
+      content = <React.Fragment>{p.slice(0, s)}<mark style={{ background: ACCENT, color: "#000", borderRadius: 3, padding: "0 2px" }}>{p.slice(s, e)}</mark>{p.slice(e)}</React.Fragment>;
+    }
+    return (
+      <p key={i} ref={el => paraRefs.current[i] = el}
+        onClick={() => { const wp = playing; stop(); setCurrentParaIdx(i); paraIdxRef.current = i; saveProgress(i); if (wp) setTimeout(() => speakFrom(i), 80); }}
+        style={{ fontSize, lineHeight: 1.85, marginBottom: "1.4em", color: isActive ? fg : fg2, cursor: "pointer", borderRadius: 8, padding: "6px 10px", marginLeft: -10, background: isActive ? (dark ? "#1a2a1a" : "#f0faf0") : "transparent", transition: "all 0.2s", fontWeight: isActive ? 500 : 400 }}>
+        {content}
+      </p>
+    );
+  };
+
+  if (view === "library") return (
+    <div style={{ height: "100%", background: bg, color: fg, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)" }}>
+      <div style={{ padding: "1.25rem 1.25rem 0.75rem", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontWeight: 500, fontSize: 22 }}>Library</span>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button onClick={() => setDark(!dark)} style={{ background: "none", border: "none", cursor: "pointer", color: fg2, padding: 6 }}>
+            <Icon d={dark ? ICONS.sun : ICONS.moon} size={20} fill={fg2} />
+          </button>
+          <button onClick={() => fileRef.current.click()} disabled={uploading}
+            style={{ background: ACCENT, border: "none", borderRadius: 50, padding: "8px 20px", cursor: "pointer", color: "#000", fontSize: 13, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon d={ICONS.upload} size={16} fill="#000" />
+            {uploading ? "Loading…" : "Add book"}
+          </button>
+          <input ref={fileRef} type="file" accept=".txt,.pdf,.docx" style={{ display: "none" }} onChange={handleFile} />
+        </div>
+      </div>
+
+      {uploadError && <div style={{ margin: "0 1.25rem 0.75rem", color: "#ff5555", fontSize: 13, padding: "8px 12px", background: dark ? "#2a1a1a" : "#fff0f0", borderRadius: 8 }}>{uploadError}</div>}
+
+      <div style={{ padding: "0 1.25rem 1.5rem", flex: 1, overflowY: "auto" }}>
+        {data.books.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "4rem 1rem", color: fg3, border: `1px dashed ${fg3}`, borderRadius: 12, marginTop: "1rem" }}>
+            <Icon d={ICONS.upload} size={32} fill={fg3} />
+            <div style={{ marginTop: 12, fontSize: 14 }}>Upload a .txt, .pdf, or .docx to get started</div>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 14, marginTop: "0.5rem" }}>
+            {data.books.map(b => (
+              <div key={b.id} onClick={() => openBook(b)}
+                style={{ background: surface, borderRadius: 12, padding: "1rem", cursor: "pointer", position: "relative", border: `1px solid ${border}` }}>
+                <div style={{ height: 80, background: surface2, borderRadius: 8, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Icon d={ICONS.bookmark} size={28} fill={ACCENT} />
+                </div>
+                <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.title}</div>
+                <div style={{ fontSize: 11, color: fg2, marginBottom: 8 }}>{b.added}</div>
+                <div style={{ height: 3, background: surface2, borderRadius: 2 }}>
+                  <div style={{ height: 3, background: ACCENT, borderRadius: 2, width: `${b.progress || 0}%` }} />
+                </div>
+                <div style={{ fontSize: 11, color: fg3, marginTop: 4 }}>{b.progress || 0}%</div>
+                <button onClick={e => { e.stopPropagation(); deleteBook(b.id); }}
+                  style={{ position: "absolute", top: 8, right: 8, background: "none", border: "none", cursor: "pointer", color: fg3, padding: 2 }}>
+                  <Icon d={ICONS.close} size={16} fill={fg3} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const paras = activeBook?.paragraphs || [];
+  const bookmarks = activeBook?.bookmarks || [];
+  const pct = activeBook?.progress || 0;
+  const installed = voices.filter(v => v.localService);
+  const cloud = voices.filter(v => !v.localService);
+
+  return (
+    <div style={{ height: "100%", background: bg, color: fg, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0.8rem 1rem", borderBottom: `1px solid ${border}`, flexShrink: 0 }}>
+        <button onClick={() => { stop(); setView("library"); }} style={{ background: "none", border: "none", cursor: "pointer", color: fg2, padding: 4 }}>
+          <Icon d={ICONS.chevL} size={22} fill={fg2} />
+        </button>
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <div style={{ fontWeight: 500, fontSize: 15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{activeBook?.title}</div>
+          <div style={{ fontSize: 12, color: fg2 }}>{pct}% complete</div>
+        </div>
+        <button onClick={addBookmark} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+          <Icon d={ICONS.bookmark} size={20} fill={playing ? ACCENT : fg2} />
+        </button>
+        <button onClick={() => setShowPanel(!showPanel)} style={{ background: showPanel ? surface2 : "none", border: "none", cursor: "pointer", padding: 6, borderRadius: 6 }}>
+          <Icon d={ICONS.list} size={20} fill={showPanel ? ACCENT : fg2} />
+        </button>
+        <button onClick={() => setDark(!dark)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+          <Icon d={dark ? ICONS.sun : ICONS.moon} size={18} fill={fg2} />
+        </button>
+      </div>
+
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        <div ref={contentRef} style={{ flex: 1, overflowY: "auto", padding: "1.5rem 1.25rem 1rem", WebkitOverflowScrolling: "touch" }}>
+          {paras.map((p, i) => renderPara(p, i))}
+        </div>
+
+        {showPanel && (
+          <div style={{ width: 200, borderLeft: `1px solid ${border}`, overflowY: "auto", background: surface, flexShrink: 0 }}>
+            <div style={{ padding: "0.85rem 1rem", borderBottom: `1px solid ${border}`, fontWeight: 500, fontSize: 14 }}>Bookmarks</div>
+            <div style={{ padding: "0.75rem" }}>
+              {bookmarks.length === 0 && <div style={{ fontSize: 12, color: fg2 }}>Tap 🔖 to save your spot.</div>}
+              {bookmarks.map(bm => (
+                <div key={bm.id} style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <button onClick={() => { const wp = playing; stop(); setCurrentParaIdx(bm.paraIdx); paraIdxRef.current = bm.paraIdx; scrollToPara(bm.paraIdx); if (wp) setTimeout(() => speakFrom(bm.paraIdx), 80); setShowPanel(false); }}
+                    style={{ flex: 1, textAlign: "left", background: surface2, border: "none", borderRadius: 8, padding: "8px 10px", cursor: "pointer", color: fg, fontSize: 12 }}>
+                    <div style={{ fontWeight: 500 }}>{bm.label}</div>
+                    <div style={{ color: fg2, fontSize: 11, marginTop: 2 }}>{bm.date}</div>
+                  </button>
+                  <button onClick={() => { const books = data.books.map(b => b.id === activeBook.id ? { ...b, bookmarks: b.bookmarks.filter(x => x.id !== bm.id) } : b); save({ ...data, books }); setActiveBook(prev => ({ ...prev, bookmarks: prev.bookmarks.filter(x => x.id !== bm.id) })); }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: fg3, padding: 4, alignSelf: "center" }}>
+                    <Icon d={ICONS.close} size={14} fill={fg3} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ borderTop: `1px solid ${border}`, background: dark ? "#181818" : "#fafafa", padding: "0.75rem 1rem 1rem", flexShrink: 0 }}>
+        <div style={{ height: 3, background: surface2, borderRadius: 2, marginBottom: "0.9rem", cursor: "pointer" }}
+          onClick={e => { const r = e.currentTarget.getBoundingClientRect(); const p = (e.clientX - r.left) / r.width; const idx = Math.round(p * (paras.length - 1)); const wp = playing; stop(); setCurrentParaIdx(idx); paraIdxRef.current = idx; scrollToPara(idx); saveProgress(idx); if (wp) setTimeout(() => speakFrom(idx), 80); }}>
+          <div style={{ height: 3, background: ACCENT, borderRadius: 2, width: `${pct}%`, transition: "width 0.3s" }} />
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: "0.8rem", flexWrap: "wrap" }}>
+          <Icon d={ICONS.voice} size={16} fill={fg2} />
+          <select value={selectedVoice} onChange={e => { setSelectedVoice(e.target.value); if (playing) { stop(); setTimeout(() => speakFrom(paraIdxRef.current), 80); } }}
+            style={{ flex: 1, minWidth: 100, background: surface2, color: fg, border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 12 }}>
+            {installed.length > 0 && <optgroup label="On device">{installed.slice().sort((a,b) => a.name.localeCompare(b.name)).map(v => <option key={v.name} value={v.name}>{v.name}</option>)}</optgroup>}
+            {cloud.length > 0 && <optgroup label="Cloud">{cloud.slice().sort((a,b) => a.name.localeCompare(b.name)).map(v => <option key={v.name} value={v.name}>{v.name}</option>)}</optgroup>}
+          </select>
+          <select value={fontSize} onChange={e => setFontSize(+e.target.value)}
+            style={{ background: surface2, color: fg, border: "none", borderRadius: 8, padding: "6px 10px", fontSize: 12, width: 72 }}>
+            {[14,16,18,19,20,22,24].map(s => <option key={s} value={s}>{s}px</option>)}
+          </select>
+        </div>
+
+        <div style={{ display: "flex", gap: 16, marginBottom: "0.9rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: fg2, flex: 1 }}>
+            <span style={{ minWidth: 44 }}>Speed {rate.toFixed(1)}×</span>
+            <input type="range" min="0.5" max="3" step="0.1" value={rate} onChange={e => { setRate(+e.target.value); if (playing) { stop(); setTimeout(() => speakFrom(paraIdxRef.current), 80); } }} style={{ flex: 1 }} />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: fg2, flex: 1 }}>
+            <span style={{ minWidth: 44 }}>Pitch {pitch.toFixed(1)}</span>
+            <input type="range" min="0.5" max="2" step="0.1" value={pitch} onChange={e => { setPitch(+e.target.value); if (playing) { stop(); setTimeout(() => speakFrom(paraIdxRef.current), 80); } }} style={{ flex: 1 }} />
+          </label>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 20 }}>
+          <button onClick={() => skip(-5)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+            <Icon d={ICONS.back} size={22} fill={fg2} />
+          </button>
+          <button onClick={() => skip(-1)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+            <Icon d={ICONS.prev} size={26} fill={fg} />
+          </button>
+          <button onClick={toggle}
+            style={{ background: ACCENT, border: "none", borderRadius: "50%", width: 56, height: 56, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon d={playing ? ICONS.pause : ICONS.play} size={28} fill="#000" />
+          </button>
+          <button onClick={() => skip(1)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+            <Icon d={ICONS.next} size={26} fill={fg} />
+          </button>
+          <button onClick={() => skip(5)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+            <Icon d={ICONS.fwd} size={22} fill={fg2} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+</script>
+</body>
+</html>
