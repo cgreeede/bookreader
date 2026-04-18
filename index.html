@@ -144,10 +144,27 @@ function App() {
         });
       } catch {}
     };
-    const poll = () => { load(); if (mounted && ++attempts < 15) timer = setTimeout(poll, 500); };
+    const poll = () => { load(); if (mounted && ++attempts < 40) timer = setTimeout(poll, 500); };
     window.speechSynthesis.onvoiceschanged = load;
     timer = setTimeout(poll, 100);
-    return () => { mounted = false; clearTimeout(timer); try { window.speechSynthesis.onvoiceschanged = null; } catch {} };
+
+    const unlock = () => {
+      try {
+        const u = new SpeechSynthesisUtterance("");
+        u.volume = 0;
+        window.speechSynthesis.speak(u);
+        window.speechSynthesis.cancel();
+        setTimeout(load, 100);
+        setTimeout(load, 500);
+        setTimeout(load, 1500);
+      } catch {}
+      document.removeEventListener("touchstart", unlock);
+      document.removeEventListener("click", unlock);
+    };
+    document.addEventListener("touchstart", unlock, { once: true });
+    document.addEventListener("click", unlock, { once: true });
+
+    return () => { mounted = false; clearTimeout(timer); try { window.speechSynthesis.onvoiceschanged = null; } catch {} document.removeEventListener("touchstart", unlock); document.removeEventListener("click", unlock); };
   }, []);
 
   useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
